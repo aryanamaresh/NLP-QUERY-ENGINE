@@ -1,0 +1,187 @@
+{
+  "name": "nlp-query-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "axios": "^1.4.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
+  }
+}
+import React, { useState } from "react";
+import DatabaseConnector from "./components/DatabaseConnector";
+import QueryPanel from "./components/QueryPanel";
+import ResultsView from "./components/ResultsView";
+
+function App() {
+  const [results, setResults] = useState(null);
+
+  return (
+    <div style={{ padding: 20, fontFamily: "Arial, sans-serif" }}>
+      <h2 style={{ color: "#333" }}>🧠 NLP Query Engine (Demo)</h2>
+
+      <DatabaseConnector />
+      <hr />
+
+      {/* You can add DocumentUploader here when ready */}
+      <QueryPanel onResults={setResults} />
+      <ResultsView results={results} />
+    </div>
+  );
+}
+
+export default App;
+import React, { useState } from "react";
+import axios from "axios";
+
+export default function DatabaseConnector() {
+  const [conn, setConn] = useState("sqlite:///./data/sample_employees.db");
+  const [schema, setSchema] = useState(null);
+
+  const connect = async () => {
+    try {
+      const form = new FormData();
+      form.append("connection_string", conn);
+
+      const res = await axios.post(
+        "http://localhost:8000/api/ingest/database",
+        form
+      );
+
+      setSchema(res.data.schema);
+      alert(" Database connected! Schema discovered. Check console for details.");
+      console.log(res.data.schema);
+    } catch (e) {
+      console.error(e);
+      alert(" Error connecting: " + e.message);
+    }
+  };
+
+  return (
+    <div>
+      <h3>🗄️ Database Connector</h3>
+      <input
+        style={{ width: "70%", padding: "6px" }}
+        value={conn}
+        onChange={(e) => setConn(e.target.value)}
+      />
+      <button onClick={connect} style={{ marginLeft: "10px" }}>
+        Connect & Analyze
+      </button>
+
+      {schema && (
+        <pre
+          style={{
+            maxHeight: 200,
+            overflow: "auto",
+            background: "#f7f7f7",
+            padding: "10px",
+            borderRadius: "6px",
+            marginTop: "10px"
+          }}
+        >
+          {JSON.stringify(schema, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+import React, { useState } from "react";
+import axios from "axios";
+
+export default function QueryPanel({ onResults }) {
+  const [q, setQ] = useState("");
+
+  const submit = async () => {
+    if (!q) return alert("Please enter a query first.");
+    try {
+      const res = await axios.post("http://localhost:8000/api/query", {
+        query: q,
+      });
+      onResults(res.data);
+    } catch (e) {
+      alert("Error while querying: " + e.message);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <h3>💬 Query</h3>
+      <input
+        style={{ width: "60%", padding: "6px" }}
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder='e.g., "Show me all Python developers in Engineering"'
+      />
+      <button onClick={submit} style={{ marginLeft: "10px" }}>
+        Run
+      </button>
+    </div>
+  );
+}
+
+import React from "react";
+
+export default function ResultsView({ results }) {
+  if (!results)
+    return (
+      <div style={{ marginTop: 20 }}>
+        <h3>📊 Results</h3>
+        <p>No results yet. Run a query above.</p>
+      </div>
+    );
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <h3>📊 Results</h3>
+      <div style={{ marginBottom: 10 }}>
+        Query type: <strong>{results.type}</strong> — Time:{" "}
+        <strong>{results.time_ms} ms</strong>{" "}
+        {results.cached ? "(cached)" : ""}
+      </div>
+
+      {results.results &&
+        results.results.map((r, i) => (
+          <div
+            key={i}
+            style={{
+              border: "1px solid #ddd",
+              borderRadius: "8px",
+              padding: "10px",
+              marginBottom: "10px",
+              background: "#fafafa",
+            }}
+          >
+            {r.kind === "table" && (
+              <div>
+                <strong>Table Rows:</strong>
+                <pre>{JSON.stringify(r.rows.slice(0, 10), null, 2)}</pre>
+              </div>
+            )}
+            {r.kind === "document" && (
+              <div>
+                <strong>📄 Document Match</strong>
+                <div>
+                  <em>source:</em> {r.source}
+                </div>
+                <pre>
+                  {r.text.slice(0, 300)}
+                  {r.text.length > 300 ? "..." : ""}
+                </pre>
+              </div>
+            )}
+          </div>
+        ))}
+
+      {results.error && (
+        <div style={{ color: "red", fontWeight: "bold" }}>{results.error}</div>
+      )}
+    </div>
+  );
+}
