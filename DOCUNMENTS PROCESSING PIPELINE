@@ -1,0 +1,179 @@
+🧮 1. Document Ingestion / Upload
+
+Objective: Accept files (PDF, DOCX, TXT, etc.) from users or employees.
+
+Process:
+
+1.User uploads a document (e.g., resume.pdf).
+
+2.System captures metadata:
+
+filename
+
+file_type (pdf, docx, etc.)
+
+emp_id (if tied to an employee)
+
+uploaded_at (auto)
+
+source (upload, email, etc.)
+
+3.Entry is created in the documents table.
+EXAMPLE DATA BASE
+INSERT INTO documents (emp_id, filename, file_type, source)
+VALUES (123, 'resume.pdf', 'pdf', 'upload')
+RETURNING doc_id;
+
+🧠 2. Text Extraction
+
+Objective: Extract raw text from the uploaded document.
+
+Implementation Options:
+
+For PDF: use libraries like PyMuPDF, pdfminer.six, or pytesseract (OCR).
+
+For DOCX: use python-docx.
+
+For images: use OCR tools (e.g., Tesseract).
+
+Pseudocode (Python Example):
+import fitz  # PyMuPDF
+
+def extract_text_from_pdf(file_path):
+    text = ""
+    with fitz.open(file_path) as doc:
+        for page in doc:
+            text += page.get_text()
+    return text
+📄 3. Text Preprocessing
+
+Objective: Clean and normalize extracted text before chunking or analysis.
+
+Steps:
+
+Remove stopwords and special symbols.
+
+Normalize whitespace.
+
+Convert to lowercase.
+
+Optionally detect language.
+
+Example Python Snippet:
+import re
+def clean_text(text):
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+🧩 4. Chunking / Splitting
+
+Objective: Break long documents into smaller, manageable text chunks for embedding or search.
+
+Why: Improves efficiency for semantic search or vector retrieval.
+
+Example Code:
+def chunk_text(text, chunk_size=500, overlap=50):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
+    return chunks
+
+🤖 5. Embedding Generation (Optional for AI/RAG)
+
+Objective: Generate vector embeddings for semantic search or question answering.
+
+Tools:
+
+OpenAI Embeddings API (text-embedding-3-large)
+
+HuggingFace models (e.g., sentence-transformers)
+
+Pseudocode:
+from openai import OpenAI
+client = OpenAI()
+
+embedding = client.embeddings.create(
+    model="text-embedding-3-large",
+    input=chunk_text
+)
+
+🔍 6. Document Indexing & Search
+
+Objective: Allow searching or querying documents by keywords or meaning.
+
+Options:
+
+Keyword search: using LIKE or to_tsvector (Postgres full-text search)
+
+Semantic search: using vector similarity (if embeddings are used)
+
+Keyword Search Example:
+SELECT filename, emp_id
+FROM documents
+WHERE content_text ILIKE '%python%';
+
+🧾 7. Insights & Linking
+
+Objective: Connect document insights back to employees or departments.
+
+Examples:
+
+Link resumes to employees.
+
+Match documents containing “Leadership” to management roles.
+
+Auto-tag HR documents by department.
+
+SQL Example:
+SELECT e.full_name, d.filename
+FROM employees e
+JOIN documents d ON e.emp_id = d.emp_id
+WHERE d.content_text ILIKE '%leadership%';
+
+📊 8. Monitoring & Audit
+
+Objective: Track document uploads, processing status, and failures.
+
+You can add optional fields to documents:
+ALTER TABLE documents
+ADD COLUMN processing_status TEXT DEFAULT 'pending',
+ADD COLUMN error_message TEXT NULL;
+
+
+🧠 Pipeline Summary Diagram (Conceptual)
+          +----------------------+
+          |   Upload Document    |
+          +----------+-----------+
+                     |
+                     v
+          +----------------------+
+          |  Text Extraction     |
+          +----------+-----------+
+                     |
+                     v
+          +----------------------+
+          |   Text Cleaning      |
+          +----------+-----------+
+                     |
+                     v
+          +----------------------+
+          |  Chunking / Splitting|
+          +----------+-----------+
+                     |
+                     v
+          +----------------------+
+          | Embedding (optional) |
+          +----------+-----------+
+                     |
+                     v
+          +----------------------+
+          |   Store in Database  |
+          +----------+-----------+
+                     |
+                     v
+          +----------------------+
+          |  Search / Insights   |
+          +----------------------+
