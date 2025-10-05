@@ -1,0 +1,289 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.api import ingestion, query, schema
+
+app = FastAPI(title="NLP Query Engine")
+
+# Allow all CORS (for local frontend testing)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(ingestion.router, prefix="/api/ingest", tags=["ingest"])
+app.include_router(query.router, prefix="/api", tags=["query"])
+app.include_router(schema.router, prefix="/api", tags=["schema"])
+from fastapi import APIRouter, Form, UploadFile, File
+from typing import List
+from app.services.schema_discovery import SchemaDiscovery
+from app.services.document_processor import DocumentProcessor
+from uuid import uuid4
+import os
+
+router = APIRouter()
+_jobs = {}  # simple in-memory job store
+
+@router.post("/database")
+async def ingest_database(connection_string: str = Form(...)):
+    sd = SchemaDiscovery()
+    schema = sd.analyze_database(connection_string)
+    return {"status": "ok", "schema": schema}
+
+@router.post("/documents")
+async def ingest_documents(files: List[UploadFile] = File(...)):
+    job_id = str(uuid4())
+    _jobs[job_id] = {"status": "queued", "processed": 0, "total": len(files)}
+
+    proc = DocumentProcessor()
+
+    for f in files:
+        contents = await f.read()
+        filename = f.filename
+        path = os.path.join("/tmp", f"{job_id}_{filename}")
+        with open(path, "wb") as fh:
+            fh.write(contents)
+        proc.process_document(path)
+        _jobs[job_id]["processed"] += 1
+
+    _jobs[job_id]["status"] = "done"
+    return {"job_id": job_id, "status": "done"}
+
+@router.get("/status/{job_id}")
+async def get_status(job_id: str):
+    return _jobs.get(job_id, {"status": "not_found"})
+from fastapi import APIRouter
+from pydantic import BaseModel
+from app.services.query_engine import QueryEngine
+
+router = APIRouter()
+qe = QueryEngine()  # uses default SQLite DB and FAISS memory
+
+class QueryRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    page: int = 1
+
+@router.post("/query")
+async def process_query(req: QueryRequest):
+    res = qe.process_query(req.query, top_k=req.top_k, page=req.page)
+    return res
+from fastapi import APIRouter
+from app.services.schema_discovery import SchemaDiscovery
+
+router = APIRouter()
+
+@router.get("/")
+async def get_schema():
+    sd = SchemaDiscovery()
+    schema = sd.analyze_database("sqlite:///./data/sample_employees.db")
+    return schema
+import sqlalchemy
+from sqlalchemy import create_engine, text
+from rapidfuzz import process, fuzz
+
+class SchemaDiscovery:
+    def analyze_database(self, connection_string: str):
+        engine = create_engine(connection_string, future=True)
+        insp = sqlalchemy.inspect(engine)
+        tables = insp.get_table_names()
+        schema = {}
+
+        with engine.connect() as conn:
+            for t in tables:
+                cols = insp.get_columns(t)
+                try:
+                    r = conn.execute(text(f"SELECT * FROM {t} LIMIT 10"))
+                    rows = [dict(row._mapping) for row in r.fetchall()]
+                except Exception:
+                    rows = []
+                schema[t] = {
+                    "columns": [{"name": c["name"], "type": str(c["type"])} for c in cols],
+                    "sample_rows": rows,
+                }
+        return {"connection": connection_string, "tables": schema}
+
+    def map_nl_to_schema(self, query: str, schema: dict):
+        choices = []
+        for t, meta in schema.get("tables", {}).items():
+            for c in meta["columns"]:
+                choices.append(f"{t}.{c['name']}")
+
+        tokens = [tok for tok in query.replace('?', '').split() if len(tok) > 2]
+        mapping = {}
+        for tok in tokens:
+            best = process.extractOne(tok, choices, scorer=fuzz.WRatio)
+            if best and best[1] > 60:
+                mapping[tok] = best[0]
+        return mapping
+import os, uuid
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
+from typing import List
+from pdfminer.high_level import extract_text as extract_pdf_text
+import docx
+
+DATA_DIR = "./data/docs"
+EMBEDDING_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+
+class DocumentProcessor:
+    def __init__(self):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        self.metadata = []
+        self._init_faiss()
+
+    def _init_faiss(self):
+        dims = 384
+        self.index = faiss.IndexFlatL2(dims)
+
+    def _text_from_doc(self, path: str) -> str:
+        if path.lower().endswith(".pdf"):
+            return extract_pdf_text(path)
+        elif path.lower().endswith(".docx"):
+            doc = docx.Document(path)
+            return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        else:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                return fh.read()
+
+    def dynamic_chunking(self, text: str) -> List[str]:
+        pieces = [p.strip() for p in text.split("\n\n") if p.strip()]
+        chunks, buffer = [], ""
+        for p in pieces:
+            if len(buffer) + len(p) < 800:
+                buffer = (buffer + "\n\n" + p).strip()
+            else:
+                chunks.append(buffer)
+                buffer = p
+        if buffer:
+            chunks.append(buffer)
+        return chunks
+
+    def process_document(self, path: str):
+        text = self._text_from_doc(path)
+        chunks = self.dynamic_chunking(text)
+        embeddings = EMBEDDING_MODEL.encode(chunks, convert_to_numpy=True)
+        self.index.add(embeddings.astype("float32"))
+        for c in chunks:
+            self.metadata.append({
+                "id": str(uuid.uuid4()),
+                "source": os.path.basename(path),
+                "text": c
+            })
+
+    def search(self, query: str, top_k=5):
+        q_emb = EMBEDDING_MODEL.encode([query], convert_to_numpy=True)
+        D, I = self.index.search(q_emb.astype("float32"), top_k)
+        results = []
+        for idx, dist in zip(I[0], D[0]):
+            if idx < len(self.metadata):
+                results.append({
+                    "score": float(dist),
+                    "text": self.metadata[idx]["text"],
+                    "source": self.metadata[idx]["source"]
+                })
+        return results
+from app.services.schema_discovery import SchemaDiscovery
+from app.services.document_processor import DocumentProcessor
+from sqlalchemy import create_engine, text
+import time
+
+class QueryEngine:
+    def __init__(self, connection_string: str = "sqlite:///./data/sample_employees.db"):
+        self.conn_str = connection_string
+        self.sd = SchemaDiscovery()
+        self.schema = self.sd.analyze_database(self.conn_str)
+        self.doc_proc = DocumentProcessor()
+        self.engine = create_engine(self.conn_str, future=True)
+        self.cache = {}
+
+    def classify(self, query: str):
+        q = query.lower()
+        if any(tok in q for tok in ["resume", "cv", "document", "pdf"]):
+            return "document"
+        if any(tok in q for tok in ["count", "average", "sum", "top", "highest", "list", "show"]):
+            return "sql"
+        return "hybrid"
+
+    def process_query(self, user_query: str, top_k=5, page=1):
+        start = time.time()
+        key = f"{user_query}|{top_k}|{page}"
+        if key in self.cache:
+            res = self.cache[key]
+            res["cached"] = True
+            return res
+
+        qtype = self.classify(user_query)
+        result = {"query": user_query, "type": qtype, "sources": [], "results": [], "cached": False}
+
+        if qtype in ("document", "hybrid"):
+            doc_res = self.doc_proc.search(user_query, top_k)
+            result["results"].extend([{"kind": "document", **r} for r in doc_res])
+            result["sources"].append("documents")
+
+        if qtype in ("sql", "hybrid"):
+            try:
+                mapping = self.sd.map_nl_to_schema(user_query, self.schema)
+                table = list(self.schema["tables"].keys())[0]
+                if "count" in user_query.lower():
+                    sql = f"SELECT COUNT(*) as count FROM {table}"
+                else:
+                    sql = f"SELECT * FROM {table} LIMIT 10"
+                with self.engine.connect() as conn:
+                    rows = [dict(row._mapping) for row in conn.execute(text(sql))]
+                result["results"].append({"kind": "table", "rows": rows})
+                result["sources"].append("database")
+            except Exception as e:
+                result["error"] = str(e)
+
+        result["time_ms"] = int((time.time() - start) * 1000)
+        self.cache[key] = result
+        return result
+import sqlite3, os
+
+os.makedirs("./data", exist_ok=True)
+db = "./data/sample_employees.db"
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+cur.executescript("""
+DROP TABLE IF EXISTS employees;
+DROP TABLE IF EXISTS departments;
+
+CREATE TABLE departments(
+    dept_id INTEGER PRIMARY KEY,
+    name TEXT,
+    manager_id INTEGER
+);
+
+CREATE TABLE employees(
+    emp_id INTEGER PRIMARY KEY,
+    full_name TEXT,
+    dept_id INTEGER,
+    position TEXT,
+    annual_salary REAL,
+    join_date TEXT,
+    skills TEXT,
+    FOREIGN KEY (dept_id) REFERENCES departments(dept_id)
+);
+
+INSERT INTO departments VALUES
+(1, 'Engineering', 101),
+(2, 'HR', 102),
+(3, 'Sales', 103);
+
+INSERT INTO employees VALUES
+(1002, 'Aryan Amaresh', 1, 'Engineering Manager', 150000, '2020-03-15', 'Python,Leadership'),
+(1022, 'Harsh Kumar', 2, 'HR Lead', 90000, '2019-07-01', 'Recruiting'),
+(1234, 'Raj Awasthi', 3, 'Sales Director', 130000, '2018-01-12', 'Negotiation,CRM'),
+(1334, 'Vishveet', 1, 'Software Engineer', 120000, '2021-06-20', 'Python,SQL,FastAPI'),
+(1045, 'Himanshu Jha', 1, 'Software Engineer', 110000, '2022-02-10', 'Java,Spring'),
+(1789, 'Ambuj Kumar', 3, 'Sales Associate', 70000, '2023-02-01', 'CRM,Excel');
+""")
+
+conn.commit()
+conn.close()
+print(" Sample DB created at ./data/sample_employees.db")
