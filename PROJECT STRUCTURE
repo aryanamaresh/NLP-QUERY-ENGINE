@@ -1,0 +1,16 @@
+project/
+├── backend/
+│ ├── api/routes/ # FastAPI endpoints
+│ ├── services/ # Core business logic
+│ ├── main.py # App entry point
+│ ├── requirements.txt # Backend dependencies
+│ └── tests/ # Optional unit tests
+│
+├── frontend/
+│ ├── src/components/ # React components
+│ ├── src/api.js # Axios setup
+│ ├── src/styles.css # UI styling
+│ └── package.json # Frontend dependencies
+│
+├── docker-compose.yml # Combined setup for app + DB
+└── README.md # You are here
